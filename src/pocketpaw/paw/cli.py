@@ -1,7 +1,9 @@
 # Paw CLI — Click-based universal entry point for PocketPaw with soul-protocol.
 # Created: 2026-03-02
-# Updated: 2026-03-02 — Fixed _print() call without args in doctor command.
-# Commands: init, ask, chat, serve, status, doctor, os, channels.
+# Updated: 2026-03-02 — Phase 2: real MCP server via `paw serve`.
+#   Phase 3: soul observer wired into `paw channels`.
+#   Phase 4: `paw export` and `paw soul` subcommands.
+# Commands: init, ask, chat, serve, status, doctor, os, channels, export, soul.
 
 from __future__ import annotations
 
@@ -332,12 +334,34 @@ async def _chat_async() -> None:
 # ---------------------------------------------------------------------------
 
 @main.command()
-@click.option("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
-@click.option("--port", "-p", default=8888, type=int, help="Port to bind (default: 8888)")
-def serve(host: str, port: int) -> None:
-    """Start MCP server (placeholder — full implementation coming soon)."""
-    _print(f"MCP server placeholder — would bind to {host}:{port}", style="yellow")
-    _print("Full MCP server integration coming in a future release.", style="dim")
+def serve() -> None:
+    """Start MCP server — connect from Claude Desktop, Cursor, etc.
+
+    The server runs over stdio (standard MCP transport). Configure in your
+    MCP client:
+
+    \b
+      {
+        "mcpServers": {
+          "my-project": {
+            "command": "paw",
+            "args": ["serve"]
+          }
+        }
+      }
+    """
+    if not _check_soul_protocol():
+        _print("soul-protocol is not installed. Run: pip install pocketpaw[paw]", style="red")
+        raise SystemExit(1)
+
+    try:
+        from pocketpaw.paw.mcp.server import run_server
+
+        run_server()
+    except ImportError as e:
+        _print(f"MCP dependencies missing: {e}", style="red")
+        _print("Install with: pip install pocketpaw[paw] fastmcp", style="dim")
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -495,8 +519,9 @@ def launch_os(port: int, dev: bool) -> None:
 @click.option("--telegram", is_flag=True, help="Start Telegram adapter")
 @click.option("--slack", is_flag=True, help="Start Slack adapter")
 @click.option("--discord", is_flag=True, help="Start Discord adapter")
-def channels(telegram: bool, slack: bool, discord: bool) -> None:
-    """Run headless channel adapters."""
+@click.option("--observe/--no-observe", default=True, help="Feed interactions to soul (default: yes)")
+def channels(telegram: bool, slack: bool, discord: bool, observe: bool) -> None:
+    """Run headless channel adapters with soul observation."""
     if not any([telegram, slack, discord]):
         _print("Specify at least one channel: --telegram, --slack, --discord", style="yellow")
         raise SystemExit(1)
@@ -522,6 +547,10 @@ def channels(telegram: bool, slack: bool, discord: bool) -> None:
         args.teams = False
         args.gchat = False
 
+        # Install soul observer on the message bus if soul-protocol is available
+        if observe and _check_soul_protocol():
+            _run_async(_install_observer())
+
         if telegram and not any([slack, discord]):
             from pocketpaw.headless import run_telegram_mode
 
@@ -535,6 +564,204 @@ def channels(telegram: bool, slack: bool, discord: bool) -> None:
         _print("Install channel extras: pip install pocketpaw[telegram,discord,slack]", style="dim")
     except KeyboardInterrupt:
         _print("Channels stopped.", style="dim")
+
+
+async def _install_observer() -> None:
+    """Install the soul channel observer on the message bus."""
+    try:
+        from pocketpaw.bus.queue import get_message_bus
+        from pocketpaw.paw.agent import get_paw_agent
+        from pocketpaw.paw.observer import SoulChannelObserver
+
+        agent = await get_paw_agent()
+        bus = get_message_bus()
+        observer = SoulChannelObserver(agent.soul, bus)
+        observer.install()
+        _print("  Soul observer active — interactions will feed the soul.", style="green")
+    except Exception as e:
+        _print(f"  Soul observer unavailable: {e}", style="yellow")
+
+
+# ---------------------------------------------------------------------------
+# paw export
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.argument("output", default=None, required=False, type=click.Path())
+def export(output: str | None) -> None:
+    """Export the soul as a portable .soul file."""
+    if not _check_soul_protocol():
+        _print("soul-protocol is not installed.", style="red")
+        raise SystemExit(1)
+
+    _run_async(_export_async(output))
+
+
+async def _export_async(output: str | None) -> None:
+    """Async implementation of paw export."""
+    from pocketpaw.paw.agent import get_paw_agent
+
+    try:
+        agent = await get_paw_agent()
+    except Exception as e:
+        _print(f"Not initialized: {e}", style="red")
+        raise SystemExit(1)
+
+    soul = agent.soul
+    config = agent.config
+
+    if output:
+        export_path = Path(output)
+    else:
+        export_path = config.project_root / f"{config.soul_name.lower()}.soul"
+
+    # Ensure .soul extension
+    if not str(export_path).endswith(".soul"):
+        export_path = export_path.with_suffix(".soul")
+
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        await soul.export(export_path)
+        _print(f"  Exported to {export_path}", style="bold green")
+        _print(f"  This file contains the full soul: identity, memories, and state.", style="dim")
+    except Exception as e:
+        _print(f"  Export failed: {e}", style="red")
+        raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# paw soul (subgroup)
+# ---------------------------------------------------------------------------
+
+@main.group()
+def soul() -> None:
+    """Soul management commands."""
+    pass
+
+
+@soul.command(name="inspect")
+def soul_inspect() -> None:
+    """Inspect the current soul's identity and stats."""
+    if not _check_soul_protocol():
+        _print("soul-protocol is not installed.", style="red")
+        raise SystemExit(1)
+
+    _run_async(_soul_inspect_async())
+
+
+async def _soul_inspect_async() -> None:
+    """Async implementation of paw soul inspect."""
+    from pocketpaw.paw.agent import get_paw_agent
+
+    try:
+        agent = await get_paw_agent()
+    except Exception as e:
+        _print(f"Not initialized: {e}", style="red")
+        raise SystemExit(1)
+
+    soul = agent.soul
+    state = soul.state
+
+    _print(f"\n  Soul: {soul.name if hasattr(soul, 'name') else 'Unknown'}", style="bold cyan")
+    _print(f"  {'─' * 40}")
+
+    if hasattr(soul, "did"):
+        _print(f"  DID:       {soul.did}")
+    if hasattr(soul, "archetype"):
+        _print(f"  Archetype: {soul.archetype}")
+    if hasattr(soul, "lifecycle"):
+        _print(f"  Lifecycle: {soul.lifecycle}")
+    if hasattr(state, "mood"):
+        _print(f"  Mood:      {state.mood}")
+    if hasattr(state, "energy"):
+        _print(f"  Energy:    {state.energy}")
+
+    # Memory count
+    if hasattr(soul, "memory_count"):
+        _print(f"  Memories:  {soul.memory_count}")
+
+    # Core memory
+    if hasattr(soul, "_memory") and hasattr(soul._memory, "core"):
+        core = soul._memory.core
+        if hasattr(core, "persona") and core.persona:
+            _print(f"\n  Persona: {core.persona[:200]}")
+        if hasattr(core, "human") and core.human:
+            _print(f"  Human:   {core.human[:200]}")
+
+    _print("")
+
+
+@soul.command(name="memories")
+@click.argument("query", default="")
+@click.option("--limit", "-n", default=10, help="Max memories to show (default: 10)")
+def soul_memories(query: str, limit: int) -> None:
+    """Search or list the soul's memories."""
+    if not _check_soul_protocol():
+        _print("soul-protocol is not installed.", style="red")
+        raise SystemExit(1)
+
+    _run_async(_soul_memories_async(query, limit))
+
+
+async def _soul_memories_async(query: str, limit: int) -> None:
+    """Async implementation of paw soul memories."""
+    from pocketpaw.paw.agent import get_paw_agent
+
+    try:
+        agent = await get_paw_agent()
+    except Exception as e:
+        _print(f"Not initialized: {e}", style="red")
+        raise SystemExit(1)
+
+    search_query = query or "project"
+    memories = await agent.soul.recall(search_query, limit=limit)
+
+    if not memories:
+        _print(f"  No memories found for: {search_query}", style="dim")
+        return
+
+    _print(f"\n  Memories ({len(memories)} results):", style="bold cyan")
+    for i, m in enumerate(memories, 1):
+        importance_bar = "*" * m.importance
+        emotion = f" ({m.emotion})" if hasattr(m, "emotion") and m.emotion else ""
+        _print(f"  {i:2d}. [{importance_bar:<10}] {m.content[:120]}{emotion}")
+    _print()
+
+
+@soul.command(name="forget")
+@click.argument("query")
+def soul_forget(query: str) -> None:
+    """Forget memories matching a query (use with care)."""
+    if not _check_soul_protocol():
+        _print("soul-protocol is not installed.", style="red")
+        raise SystemExit(1)
+
+    _run_async(_soul_forget_async(query))
+
+
+async def _soul_forget_async(query: str) -> None:
+    """Async implementation of paw soul forget."""
+    from pocketpaw.paw.agent import get_paw_agent
+
+    try:
+        agent = await get_paw_agent()
+    except Exception as e:
+        _print(f"Not initialized: {e}", style="red")
+        raise SystemExit(1)
+
+    # Find memories matching the query
+    memories = await agent.soul.recall(query, limit=5)
+    if not memories:
+        _print(f"  No memories found matching: {query}", style="dim")
+        return
+
+    _print(f"  Found {len(memories)} memories matching '{query}':", style="yellow")
+    for i, m in enumerate(memories, 1):
+        _print(f"  {i}. {m.content[:120]}")
+
+    _print("\n  Note: selective forget is a future feature.", style="dim")
+    _print("  For now, use 'paw init --no-scan' to reset.", style="dim")
 
 
 if __name__ == "__main__":

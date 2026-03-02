@@ -214,15 +214,20 @@ class TestChannelsCommand:
 
 
 class TestServeCommand:
-    def test_serve_outputs_placeholder_message(self):
+    def test_serve_requires_soul_protocol(self):
+        """Serve exits with error when soul-protocol is missing."""
         runner = CliRunner()
-        result = runner.invoke(main, ["serve"], catch_exceptions=False)
+        with patch("pocketpaw.paw.cli._check_soul_protocol", return_value=False):
+            result = runner.invoke(main, ["serve"])
+        assert result.exit_code == 1
+        assert "soul-protocol" in result.output.lower() or "not installed" in result.output.lower()
 
-        assert result.exit_code == 0
-        assert "MCP" in result.output or "placeholder" in result.output.lower()
-
-    def test_serve_custom_port_accepted(self):
+    def test_serve_calls_mcp_server(self):
+        """Serve delegates to MCP server when soul-protocol is available."""
         runner = CliRunner()
-        result = runner.invoke(main, ["serve", "--port", "9999"], catch_exceptions=False)
-
-        assert result.exit_code == 0
+        with (
+            patch("pocketpaw.paw.cli._check_soul_protocol", return_value=True),
+            patch("pocketpaw.paw.mcp.server.run_server") as mock_run,
+        ):
+            result = runner.invoke(main, ["serve"])
+        mock_run.assert_called_once()
