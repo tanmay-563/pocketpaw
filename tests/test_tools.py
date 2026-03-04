@@ -129,10 +129,12 @@ class TestScreenshotTool:
 class TestConfig:
     """Tests for configuration."""
 
-    def test_settings_defaults(self):
+    def test_settings_defaults(self, monkeypatch):
         """Settings should have sensible defaults."""
         from pocketpaw.config import Settings
 
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("POCKETPAW_OLLAMA_HOST", raising=False)
         settings = Settings()
 
         assert settings.agent_backend == "claude_agent_sdk"  # New default
