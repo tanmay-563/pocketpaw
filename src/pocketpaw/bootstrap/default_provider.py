@@ -29,7 +29,7 @@ def _read_identity_file(path: Path, strip: bool = False) -> str:
     cached = _identity_file_cache.get(key)
     if cached and cached.mtime == mtime:
         return cached.content
-    content = path.read_text(encoding="utf-8")
+    content = path.read_text(encoding="utf-8", errors="replace")
     if strip:
         content = content.strip()
     _identity_file_cache[key] = _IdentityCache(content=content, mtime=mtime)
