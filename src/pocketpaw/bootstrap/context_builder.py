@@ -40,6 +40,7 @@ class AgentContextBuilder:
         channel: Channel | None = None,
         sender_id: str | None = None,
         session_key: str | None = None,
+        file_context: dict | None = None,
     ) -> str:
         """Build the complete system prompt.
 
@@ -49,6 +50,7 @@ class AgentContextBuilder:
             channel: Target channel for format-aware hints.
             sender_id: Sender identifier for memory scoping and identity injection.
             session_key: Current session key for session management tools.
+            file_context: Optional file/directory context from the desktop client.
         """
         # 1. Load static identity + memory context concurrently (independent I/O)
         if include_memory:
@@ -110,7 +112,19 @@ class AgentContextBuilder:
                 f"switch_session, clear_session, rename_session, delete_session)."
             )
 
-        # 6. Inject health state (only when degraded/unhealthy — saves context window)
+        # 6. Inject file context from desktop client
+        if file_context:
+            fc_parts = []
+            if file_context.get("current_dir"):
+                fc_parts.append(f"Working directory: {file_context['current_dir']}")
+            if file_context.get("open_file"):
+                fc_parts.append(f"Open file: {file_context['open_file']}")
+            if file_context.get("selected_files"):
+                fc_parts.append(f"Selected files: {', '.join(file_context['selected_files'])}")
+            if fc_parts:
+                parts.append("\n# File Context\n" + "\n".join(fc_parts))
+
+        # 7. Inject health state (only when degraded/unhealthy — saves context window)
         try:
             from pocketpaw.health import get_health_engine
 

@@ -184,6 +184,11 @@
             "icon": "lucide:shield"
           },
           {
+            "label": "Command Centers",
+            "href": "/concepts/command-centers",
+            "icon": "lucide:layout-dashboard"
+          },
+          {
             "label": "PocketPaw vs OpenClaw",
             "href": "/concepts/vs-openclaw",
             "icon": "lucide:scale"
@@ -519,6 +524,11 @@
             "icon": "lucide:brain"
           },
           {
+            "label": "PawKit Reference",
+            "href": "/advanced/pawkit",
+            "icon": "lucide:package"
+          },
+          {
             "label": "Mission Control",
             "href": "/advanced/mission-control",
             "icon": "lucide:radar"
@@ -625,7 +635,9 @@
               { "label": "Approve Plan", "href": "/api/post-deep-work-approve", "method": "POST" },
               { "label": "Pause Project", "href": "/api/post-deep-work-pause", "method": "POST" },
               { "label": "Resume Project", "href": "/api/post-deep-work-resume", "method": "POST" },
-              { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" }
+              { "label": "Cancel Project", "href": "/api/post-deep-work-cancel", "method": "POST" },
+              { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" },
+              { "label": "Retry Task", "href": "/api/post-deep-work-retry-task", "method": "POST" }
             ]
           },
           {
