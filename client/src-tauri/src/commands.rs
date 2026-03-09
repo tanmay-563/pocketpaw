@@ -1,6 +1,7 @@
 // Tauri IPC commands for the PocketPaw desktop client.
 // Updated: 2026-03-09 — Fix cross-platform build: use #[cfg(windows)] for
 //   Windows-specific process creation flags instead of cfg!(windows) runtime check.
+//   Prefix unused `profile` param with underscore to suppress warning.
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
@@ -93,7 +94,7 @@ pub struct InstallProgress {
 /// Install PocketPaw by spawning a non-interactive installer process.
 /// Streams stdout line-by-line via "install-progress" events.
 #[tauri::command]
-pub async fn install_pocketpaw(app: AppHandle, profile: String) -> Result<bool, String> {
+pub async fn install_pocketpaw(app: AppHandle, _profile: String) -> Result<bool, String> {
     let child = if cfg!(windows) {
         Command::new("powershell")
             .args([

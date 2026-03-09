@@ -436,12 +436,13 @@ pub fn fs_open_in_terminal(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
+        let xterm_cmd = format!("cd '{}' && $SHELL", dir_str);
         let terminals = [
             ("x-terminal-emulator", vec!["--working-directory", &dir_str]),
             ("gnome-terminal", vec!["--working-directory", &dir_str]),
             ("konsole", vec!["--workdir", &dir_str]),
             ("xfce4-terminal", vec!["--working-directory", &dir_str]),
-            ("xterm", vec!["-e", &format!("cd '{}' && $SHELL", dir_str)]),
+            ("xterm", vec!["-e", xterm_cmd.as_str()]),
         ];
         let mut launched = false;
         for (cmd, args) in &terminals {
