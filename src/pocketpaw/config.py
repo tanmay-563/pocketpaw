@@ -34,6 +34,11 @@ _API_KEY_PATTERNS = {
         "example": "sk-...",
         "name": "OpenAI API key",
     },
+    "openrouter_api_key": {
+        "pattern": re.compile(r"^sk-or-v1-"),
+        "example": "sk-or-v1-...",
+        "name": "OpenRouter API key",
+    },
     "telegram_bot_token": {
         "pattern": re.compile(r"^\d+:AA[A-Za-z0-9_-]{30,}$"),
         "example": "123456789:AAH...",
@@ -280,6 +285,12 @@ class Settings(BaseSettings):
     openai_compatible_max_tokens: int = Field(
         default=0,
         description="Max output tokens for OpenAI-compatible endpoint (0 = no limit)",
+    )
+    openrouter_api_key: str | None = Field(
+        default=None, description="API key for OpenRouter (sk-or-v1-...)"
+    )
+    openrouter_model: str = Field(
+        default="", description="Model slug for OpenRouter (e.g. anthropic/claude-sonnet-4-6)"
     )
     gemini_model: str = Field(default="gemini-3-pro-preview", description="Gemini model to use")
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
