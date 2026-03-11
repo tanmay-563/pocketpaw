@@ -214,10 +214,13 @@ Examples:
     def _bg_update_check() -> None:
         try:
             from pocketpaw.config import get_config_dir
-            from pocketpaw.update_check import check_for_updates, print_styled_update_notice
+            from pocketpaw.update_check import (
+                check_for_updates_full,
+                print_styled_update_notice,
+            )
 
-            update_info = check_for_updates(get_version("pocketpaw"), get_config_dir())
-            if update_info and update_info.get("update_available"):
+            update_info = check_for_updates_full(get_version("pocketpaw"), get_config_dir())
+            if update_info.get("update_available") or update_info.get("announcement"):
                 print_styled_update_notice(update_info)
         except Exception:
             pass  # Update check failure never interrupts startup

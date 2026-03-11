@@ -882,15 +882,33 @@ def _static_version() -> str:
 
 @app.get("/api/version")
 async def get_version_info():
-    """Return current version and update availability."""
+    """Return current version, update availability, and announcements.
+
+    Backward-compat alias for /api/v1/updates.
+    """
     from importlib.metadata import version as get_version
 
     from pocketpaw.config import get_config_dir
-    from pocketpaw.update_check import check_for_updates
+    from pocketpaw.update_check import check_for_updates_full
 
     current = get_version("pocketpaw")
-    info = check_for_updates(current, get_config_dir())
-    return info or {"current": current, "latest": current, "update_available": False}
+    return check_for_updates_full(current, get_config_dir())
+
+
+@app.post("/api/version/dismiss")
+async def dismiss_version_banner(request: Request):
+    """Record that the user dismissed the update banner for a specific version.
+
+    Backward-compat alias for /api/v1/updates/dismiss.
+    """
+    from pocketpaw.config import get_config_dir
+    from pocketpaw.update_check import mark_version_seen
+
+    body = await request.json()
+    version = body.get("version", "")
+    if version:
+        mark_version_seen(version, get_config_dir())
+    return {"ok": True}
 
 
 @app.get("/")

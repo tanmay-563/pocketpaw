@@ -31,6 +31,10 @@ function app() {
         appVersion: '',
         latestVersion: '',
         updateAvailable: false,
+        announcement: '',
+        announcementUrgency: 'info',
+        announcementUrl: '',
+        updateBannerDismissed: false,
 
         // View state
         view: 'chat',
@@ -351,17 +355,40 @@ function app() {
         },
 
         /**
-         * Check PyPI for newer version via /api/version endpoint.
+         * Check for newer version + announcements via /api/v1/updates endpoint.
          */
         async checkForUpdates() {
             try {
-                const resp = await fetch('/api/version');
+                const resp = await fetch('/api/v1/updates');
                 if (!resp.ok) return;
                 const data = await resp.json();
                 this.appVersion = data.current || '';
                 this.latestVersion = data.latest || '';
                 this.updateAvailable = !!data.update_available;
+                this.announcement = data.announcement || '';
+                this.announcementUrgency = data.urgency || 'info';
+                this.announcementUrl = data.announcement_url || '';
+
+                // Check if this version's banner was already dismissed
+                const dismissedVersion = localStorage.getItem('pocketpaw_dismissed_update');
+                if (dismissedVersion === this.latestVersion && !this.announcement) {
+                    this.updateBannerDismissed = true;
+                }
             } catch (e) { /* silent */ }
+        },
+
+        /**
+         * Dismiss the update banner and persist the choice.
+         */
+        dismissUpdateBanner() {
+            this.updateBannerDismissed = true;
+            localStorage.setItem('pocketpaw_dismissed_update', this.latestVersion);
+            // Notify backend so mark_version_seen is recorded
+            fetch('/api/v1/updates/dismiss', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ version: this.latestVersion }),
+            }).catch(() => {});
         },
 
         /**

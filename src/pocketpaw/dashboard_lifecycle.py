@@ -200,6 +200,50 @@ async def startup_event(
             except Exception as e:
                 logger.warning("Failed to auto-start webhook adapter: %s", e)
 
+    # One-time admin DM: notify configured channels about available updates (Paw-to-Paw Phase 1)
+    try:
+        from importlib.metadata import version as get_version
+
+        from pocketpaw.config import get_config_dir
+        from pocketpaw.update_check import (
+            check_for_updates_full,
+            format_admin_update_message,
+            get_last_notified_version,
+            mark_version_notified,
+        )
+
+        config_dir = get_config_dir()
+        current = get_version("pocketpaw")
+        update_info = check_for_updates_full(current, config_dir)
+
+        if update_info.get("update_available"):
+            latest = update_info["latest"]
+            last_notified = get_last_notified_version(config_dir)
+            if last_notified != latest:
+                # Send one-time DM to all configured notification channels
+
+                async def _send_admin_update_dm():
+                    try:
+                        # Small delay so channel adapters finish connecting
+                        await asyncio.sleep(10)
+                        from pocketpaw.bus.notifier import notify
+
+                        msg = format_admin_update_message(update_info)
+                        sent = await notify(msg)
+                        if sent > 0:
+                            mark_version_notified(latest, config_dir)
+                            logger.info(
+                                "Sent update notification (v%s) to %d channel(s)",
+                                latest,
+                                sent,
+                            )
+                    except Exception as e:
+                        logger.debug("Failed to send admin update DM: %s", e)
+
+                asyncio.create_task(_send_admin_update_dm())
+    except Exception:
+        logger.debug("Update notification check failed", exc_info=True)
+
     # Ensure project directories exist for all Deep Work projects
     try:
         from pocketpaw.mission_control.manager import get_mission_control_manager
