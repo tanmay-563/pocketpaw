@@ -310,7 +310,7 @@ async def startup_event(
 
             logger.info("Semantic search initialized")
         except Exception as e:
-            logger.warning("Failed to initialize semantic search: %s", e)
+            logger.warning("Failed to initialize semantic search: %s", e, exc_info=True)
 
     # Register audit log callback for live updates
     audit_logger = get_audit_logger()
