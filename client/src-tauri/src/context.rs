@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ActiveContext {
