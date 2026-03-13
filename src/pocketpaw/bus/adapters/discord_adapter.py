@@ -58,6 +58,8 @@ class DiscordAdapter(BaseChannelAdapter):
         self._bot_task: asyncio.Task | None = None
         self._buffers: dict[str, dict[str, Any]] = {}
         self._pending_interactions: dict[str, Any] = {}  # chat_id -> interaction
+        self._source_messages: dict[str, Any] = {}  # chat_id -> discord.Message (for replies)
+        self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing refresh task
         self._start_time: float = 0.0
         # Rolling message history for conversation channels (bounded per channel)
         self._conversation_history: dict[int, deque[dict[str, str]]] = {}
@@ -414,6 +416,28 @@ class DiscordAdapter(BaseChannelAdapter):
         @tree.command(name="help", description="Show PocketPaw help")
         async def help_command(interaction: discord.Interaction):
             await _slash_to_inbound(interaction, "/help")
+
+        @tree.command(name="kill", description="Cancel the current in-flight request")
+        async def kill_command(interaction: discord.Interaction):
+            if not adapter._check_auth(interaction.guild, interaction.user, interaction.channel_id):
+                await interaction.response.send_message("Unauthorized.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True)
+            chat_id = str(interaction.channel_id)
+            adapter._stop_typing(chat_id)
+            adapter._pending_interactions[chat_id] = interaction
+            msg = InboundMessage(
+                channel=Channel.DISCORD,
+                sender_id=str(interaction.user.id),
+                chat_id=chat_id,
+                content="/kill",
+                metadata={
+                    "username": str(interaction.user),
+                    "guild_id": (str(interaction.guild_id) if interaction.guild_id else None),
+                    "interaction_id": str(interaction.id),
+                },
+            )
+            await adapter._publish_inbound(msg)
 
         # ── Utility commands ────────────────────────────────────────
 
@@ -895,6 +919,8 @@ class DiscordAdapter(BaseChannelAdapter):
                 media=media_paths,
                 metadata=metadata,
             )
+            adapter._source_messages[chat_id] = message
+            adapter._start_typing(chat_id)
             await adapter._publish_inbound(msg)
 
         self._client = client
@@ -923,6 +949,10 @@ class DiscordAdapter(BaseChannelAdapter):
 
     async def _on_stop(self) -> None:
         """Stop Discord bot."""
+        # Cancel all typing indicator tasks
+        for task in self._typing_tasks.values():
+            task.cancel()
+        self._typing_tasks.clear()
         if self._eviction_task and not self._eviction_task.done():
             self._eviction_task.cancel()
             try:
@@ -951,6 +981,36 @@ class DiscordAdapter(BaseChannelAdapter):
         clean = stripped.strip("`*_ .")
         return clean == _NO_RESPONSE_MARKER
 
+    # ── Typing indicator ─────────────────────────────────────────────
+
+    def _start_typing(self, chat_id: str) -> None:
+        """Start a background typing indicator loop for a channel."""
+        if chat_id in self._typing_tasks:
+            return
+
+        async def _typing_loop() -> None:
+            try:
+                channel = self._client.get_channel(int(chat_id))
+                if not channel:
+                    return
+                while True:
+                    try:
+                        await channel.typing()
+                    except Exception:
+                        pass
+                    # Discord typing lasts 10s, refresh at 8s
+                    await asyncio.sleep(8)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    def _stop_typing(self, chat_id: str) -> None:
+        """Stop the typing indicator for a channel."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+
     async def send(self, message: OutboundMessage) -> None:
         """Send message to Discord channel."""
         if not self._client:
@@ -964,6 +1024,8 @@ class DiscordAdapter(BaseChannelAdapter):
                 and self._is_no_response(message.content)
             ):
                 self._pending_interactions.pop(message.chat_id, None)
+                self._source_messages.pop(message.chat_id, None)
+                self._stop_typing(message.chat_id)
                 return
 
             if message.is_stream_chunk:
@@ -978,18 +1040,36 @@ class DiscordAdapter(BaseChannelAdapter):
                 return
 
             # Normal (non-streaming) message
+            self._stop_typing(message.chat_id)
             interaction = self._pending_interactions.pop(message.chat_id, None)
             if interaction:
-                for chunk in self._split_message(message.content):
-                    await interaction.followup.send(chunk)
-            else:
-                channel = self._client.get_channel(int(message.chat_id))
-                if channel:
+                try:
                     for chunk in self._split_message(message.content):
-                        await channel.send(chunk)
+                        await interaction.followup.send(chunk)
+                except Exception:
+                    logger.warning("Interaction expired, falling back to channel.send")
+                    await self._send_to_channel(message.chat_id, message.content)
+            else:
+                await self._send_to_channel(message.chat_id, message.content)
 
         except Exception as e:
             logger.error(f"Failed to send Discord message: {e}")
+
+    async def _send_to_channel(self, chat_id: str, text: str) -> None:
+        """Send text to a channel, replying to the source message if available."""
+        source_msg = self._source_messages.pop(chat_id, None)
+        channel = self._client.get_channel(int(chat_id))
+        if not channel:
+            return
+        chunks = self._split_message(text)
+        for i, chunk in enumerate(chunks):
+            if i == 0 and source_msg:
+                try:
+                    await source_msg.reply(chunk, mention_author=False)
+                except Exception:
+                    await channel.send(chunk)
+            else:
+                await channel.send(chunk)
 
     # --- Media sending ---
 
@@ -1016,6 +1096,9 @@ class DiscordAdapter(BaseChannelAdapter):
         content = message.content
         is_convo = int(chat_id) in self.conversation_channel_ids
 
+        # Stop typing once we start streaming content
+        self._stop_typing(chat_id)
+
         if chat_id not in self._buffers:
             if is_convo:
                 # Conversation mode: buffer silently, no placeholder
@@ -1027,15 +1110,29 @@ class DiscordAdapter(BaseChannelAdapter):
                 }
                 return
 
-            # Normal mode: send initial placeholder message
+            # Normal mode: send initial placeholder, reply to source if available
+            sent_msg = None
             interaction = self._pending_interactions.pop(chat_id, None)
             if interaction:
-                sent_msg = await interaction.followup.send("...", wait=True)
-            else:
+                try:
+                    sent_msg = await interaction.followup.send("...", wait=True)
+                except Exception:
+                    logger.warning("Interaction expired, falling back to channel reply")
+                    interaction = None
+
+            if sent_msg is None:
                 channel = self._client.get_channel(int(chat_id))
                 if not channel:
                     return
-                sent_msg = await channel.send("...")
+                source_msg = self._source_messages.pop(chat_id, None)
+                if source_msg:
+                    try:
+                        sent_msg = await source_msg.reply("...", mention_author=False)
+                    except Exception:
+                        sent_msg = await channel.send("...")
+                else:
+                    sent_msg = await channel.send("...")
+
             self._buffers[chat_id] = {
                 "discord_message": sent_msg,
                 "text": content,
@@ -1049,6 +1146,9 @@ class DiscordAdapter(BaseChannelAdapter):
         # Don't do periodic edits for conversation mode (no message to edit)
         if buf.get("conversation_mode"):
             return
+        # Already overflowed past the message limit, skip edits until flush
+        if buf.get("overflow_at"):
+            return
 
         now = asyncio.get_running_loop().time()
         if now - buf["last_update"] > 1.5:
@@ -1057,7 +1157,10 @@ class DiscordAdapter(BaseChannelAdapter):
 
     async def _flush_stream_buffer(self, chat_id: str) -> None:
         self._pending_interactions.pop(chat_id, None)
+        self._stop_typing(chat_id)
+
         if chat_id not in self._buffers:
+            self._source_messages.pop(chat_id, None)
             return
 
         buf = self._buffers[chat_id]
@@ -1071,18 +1174,28 @@ class DiscordAdapter(BaseChannelAdapter):
                 except Exception:
                     pass
             del self._buffers[chat_id]
+            self._source_messages.pop(chat_id, None)
             return
 
-        # Conversation mode: send the full accumulated text now
+        # Conversation mode: send the full accumulated text now, reply to source
         if buf.get("conversation_mode") and buf["discord_message"] is None:
+            source_msg = self._source_messages.pop(chat_id, None)
             channel = self._client.get_channel(int(chat_id))
             if channel:
-                for chunk in self._split_message(text):
-                    await channel.send(chunk)
+                chunks = self._split_message(text)
+                for i, chunk in enumerate(chunks):
+                    if i == 0 and source_msg:
+                        try:
+                            await source_msg.reply(chunk, mention_author=False)
+                        except Exception:
+                            await channel.send(chunk)
+                    else:
+                        await channel.send(chunk)
             del self._buffers[chat_id]
             return
 
         # Normal mode: final edit
+        self._source_messages.pop(chat_id, None)
         await self._update_buffer_message(chat_id)
         del self._buffers[chat_id]
 
@@ -1095,15 +1208,17 @@ class DiscordAdapter(BaseChannelAdapter):
             return
         try:
             discord_msg = buf["discord_message"]
-            # If text exceeds limit, edit with truncated and send overflow as new messages
             if len(text) <= DISCORD_MSG_LIMIT:
                 await discord_msg.edit(content=text)
             else:
+                # Edit the original message with first chunk, send overflow separately
                 await discord_msg.edit(content=text[:DISCORD_MSG_LIMIT])
                 channel = self._client.get_channel(int(chat_id))
                 if channel:
                     for chunk in self._split_message(text[DISCORD_MSG_LIMIT:]):
                         await channel.send(chunk)
+                # Mark overflow so periodic edits stop (avoids re-sending overflow)
+                buf["overflow_at"] = DISCORD_MSG_LIMIT
         except Exception as e:
             logger.warning(f"Failed to update Discord message: {e}")
 
