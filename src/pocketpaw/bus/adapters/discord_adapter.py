@@ -22,6 +22,8 @@ _NO_RESPONSE_MARKER = "[NO_RESPONSE]"
 _BOT_AUTHOR_KEY = "__bot__"
 _MAX_BOT_NAME_LENGTH = 64
 _IDLE_CHANNEL_TTL = 3600  # Evict conversation history for channels idle > 1 hour
+_THINKING_EMOJI = "\U0001f9e0"  # brain emoji for "processing" reaction
+_CODE_BLOCK_FILE_THRESHOLD = 800  # Upload code blocks larger than this as files
 
 # Valid activity types for the /setstatus command
 _ACTIVITY_TYPES = {"playing", "watching", "listening", "competing"}
@@ -372,9 +374,32 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, "/sessions")
 
         @tree.command(name="resume", description="Resume a previous conversation session")
+        @discord.app_commands.describe(target="Session name or number to resume")
         async def resume_command(interaction: discord.Interaction, target: str | None = None):
             content = "/resume" if not target else f"/resume {target}"
             await _slash_to_inbound(interaction, content)
+
+        @resume_command.autocomplete("target")
+        async def _resume_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.memory import get_memory_manager
+
+                mgr = get_memory_manager()
+                chat_id = str(interaction.channel_id)
+                session_key = f"discord:{chat_id}"
+                sessions = await mgr.list_sessions_for_chat(session_key)
+                choices = []
+                for s in sessions[:25]:  # Discord limit: 25 choices
+                    title = s.get("title") or s.get("session_key", "untitled")
+                    if current and current.lower() not in title.lower():
+                        continue
+                    display = title[:100]
+                    choices.append(discord.app_commands.Choice(name=display, value=title))
+                return choices
+            except Exception:
+                return []
 
         @tree.command(name="clear", description="Clear the current session history")
         async def clear_command(interaction: discord.Interaction):
@@ -393,9 +418,26 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, "/delete")
 
         @tree.command(name="backend", description="Show or switch agent backend")
+        @discord.app_commands.describe(name="Backend to switch to")
         async def backend_command(interaction: discord.Interaction, name: str | None = None):
             content = "/backend" if not name else f"/backend {name}"
             await _slash_to_inbound(interaction, content)
+
+        @backend_command.autocomplete("name")
+        async def _backend_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.agents.registry import list_backends
+
+                backends = list_backends()
+                return [
+                    discord.app_commands.Choice(name=b, value=b)
+                    for b in backends
+                    if not current or current.lower() in b.lower()
+                ][:25]
+            except Exception:
+                return []
 
         @tree.command(name="backends", description="List available backends")
         async def backends_command(interaction: discord.Interaction):
@@ -407,9 +449,25 @@ class DiscordAdapter(BaseChannelAdapter):
             await _slash_to_inbound(interaction, content)
 
         @tree.command(name="tools", description="Show or switch tool profile")
+        @discord.app_commands.describe(profile="Tool profile to switch to")
         async def tools_command(interaction: discord.Interaction, profile: str | None = None):
             content = "/tools" if not profile else f"/tools {profile}"
             await _slash_to_inbound(interaction, content)
+
+        @tools_command.autocomplete("profile")
+        async def _tools_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[discord.app_commands.Choice[str]]:
+            try:
+                from pocketpaw.tools.policy import TOOL_PROFILES
+
+                return [
+                    discord.app_commands.Choice(name=p, value=p)
+                    for p in TOOL_PROFILES
+                    if not current or current.lower() in p.lower()
+                ][:25]
+            except Exception:
+                return []
 
         @tree.command(name="help", description="Show PocketPaw help")
         async def help_command(interaction: discord.Interaction):
@@ -904,8 +962,14 @@ class DiscordAdapter(BaseChannelAdapter):
             chat_id = str(message.channel.id)
             metadata: dict[str, Any] = {
                 "username": str(message.author),
+                "display_name": message.author.display_name or str(message.author),
                 "guild_id": str(message.guild.id) if message.guild else None,
             }
+            # Include user's roles for context (guild channels only)
+            if message.guild and hasattr(message.author, "roles"):
+                role_names = [r.name for r in message.author.roles if r.name != "@everyone"]
+                if role_names:
+                    metadata["roles"] = role_names
             if is_conversation:
                 metadata["conversation_mode"] = True
 
@@ -919,6 +983,7 @@ class DiscordAdapter(BaseChannelAdapter):
             )
             adapter._source_messages[chat_id] = message
             adapter._start_typing(chat_id)
+            await adapter._add_thinking_reaction(chat_id)
             await adapter._publish_inbound(msg)
 
         self._client = client
@@ -1009,6 +1074,82 @@ class DiscordAdapter(BaseChannelAdapter):
         if task and not task.done():
             task.cancel()
 
+    # ── Reactions ─────────────────────────────────────────────────────
+
+    async def _add_thinking_reaction(self, chat_id: str) -> None:
+        """Add a thinking reaction to the source message."""
+        source = self._source_messages.get(chat_id)
+        if source:
+            try:
+                await source.add_reaction(_THINKING_EMOJI)
+            except Exception:
+                pass
+
+    async def _remove_thinking_reaction(self, chat_id: str) -> None:
+        """Remove the thinking reaction from the source message."""
+        source = self._source_messages.get(chat_id)
+        if source and self._client:
+            try:
+                await source.remove_reaction(_THINKING_EMOJI, self._client.user)
+            except Exception:
+                pass
+
+    # ── Presence ──────────────────────────────────────────────────────
+
+    async def _update_activity_from_sessions(self) -> None:
+        """Update bot activity to reflect current session count."""
+        if not self._client:
+            return
+        try:
+            import discord
+
+            # Count active buffers as a proxy for active sessions
+            active = len(self._typing_tasks) + len(self._buffers)
+            if active > 0:
+                activity = discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name=f"Helping {active} user{'s' if active != 1 else ''}",
+                )
+            elif self.activity_type and self.activity_text:
+                activity = self._build_activity(discord)
+            else:
+                activity = None
+            status = self._build_status(discord)
+            await self._client.change_presence(activity=activity, status=status)
+        except Exception:
+            pass
+
+    # ── Code block extraction ─────────────────────────────────────────
+
+    @staticmethod
+    def _extract_large_code_blocks(text: str) -> tuple[str, list[tuple[str, str, str]]]:
+        """Extract large code blocks from text, replacing them with placeholders.
+
+        Returns (cleaned_text, [(filename, language, code), ...]).
+        """
+        import re
+
+        pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+        files: list[tuple[str, str, str]] = []
+        counter = 0
+
+        def _replacer(match: re.Match) -> str:
+            nonlocal counter
+            lang = match.group(1) or "txt"
+            code = match.group(2).strip()
+            if len(code) < _CODE_BLOCK_FILE_THRESHOLD:
+                return match.group(0)  # Keep small blocks inline
+            counter += 1
+            ext = {"python": "py", "javascript": "js", "typescript": "ts", "bash": "sh"}.get(
+                lang, lang or "txt"
+            )
+            filename = f"code{counter}.{ext}" if counter > 1 else f"code.{ext}"
+            files.append((filename, lang, code))
+            return f"(see attached `{filename}`)"
+
+        cleaned = pattern.sub(_replacer, text)
+        return cleaned, files
+
     async def send(self, message: OutboundMessage) -> None:
         """Send message to Discord channel."""
         if not self._client:
@@ -1022,6 +1163,7 @@ class DiscordAdapter(BaseChannelAdapter):
                 and self._is_no_response(message.content)
             ):
                 self._pending_interactions.pop(message.chat_id, None)
+                await self._remove_thinking_reaction(message.chat_id)
                 self._source_messages.pop(message.chat_id, None)
                 self._stop_typing(message.chat_id)
                 return
@@ -1039,6 +1181,7 @@ class DiscordAdapter(BaseChannelAdapter):
 
             # Normal (non-streaming) message
             self._stop_typing(message.chat_id)
+            await self._remove_thinking_reaction(message.chat_id)
             interaction = self._pending_interactions.pop(message.chat_id, None)
             if interaction:
                 try:
@@ -1087,6 +1230,21 @@ class DiscordAdapter(BaseChannelAdapter):
         except Exception as e:
             logger.warning("Failed to send Discord media file: %s", e)
 
+    async def _send_code_files(self, channel: Any, code_files: list[tuple[str, str, str]]) -> None:
+        """Upload extracted code blocks as file attachments."""
+        if not code_files:
+            return
+        try:
+            import io
+
+            import discord
+
+            for filename, _lang, code in code_files:
+                buf = io.BytesIO(code.encode("utf-8"))
+                await channel.send(file=discord.File(buf, filename=filename))
+        except Exception as e:
+            logger.warning("Failed to send code file attachment: %s", e)
+
     # --- Stream buffering ---
 
     async def _handle_stream_chunk(self, message: OutboundMessage) -> None:
@@ -1094,8 +1252,9 @@ class DiscordAdapter(BaseChannelAdapter):
         content = message.content
         is_convo = int(chat_id) in self.conversation_channel_ids
 
-        # Stop typing once we start streaming content
+        # Stop typing and remove thinking reaction once content starts
         self._stop_typing(chat_id)
+        await self._remove_thinking_reaction(chat_id)
 
         if chat_id not in self._buffers:
             if is_convo:
@@ -1175,12 +1334,16 @@ class DiscordAdapter(BaseChannelAdapter):
             self._source_messages.pop(chat_id, None)
             return
 
+        # Extract large code blocks as file attachments
+        cleaned_text, code_files = self._extract_large_code_blocks(text)
+
         # Conversation mode: send the full accumulated text now, reply to source
         if buf.get("conversation_mode") and buf["discord_message"] is None:
             source_msg = self._source_messages.pop(chat_id, None)
             channel = self._client.get_channel(int(chat_id))
             if channel:
-                chunks = self._split_message(text)
+                send_text = cleaned_text if code_files else text
+                chunks = self._split_message(send_text)
                 for i, chunk in enumerate(chunks):
                     if i == 0 and source_msg:
                         try:
@@ -1189,12 +1352,19 @@ class DiscordAdapter(BaseChannelAdapter):
                             await channel.send(chunk)
                     else:
                         await channel.send(chunk)
+                await self._send_code_files(channel, code_files)
             del self._buffers[chat_id]
             return
 
-        # Normal mode: final edit
+        # Normal mode: final edit (with code files extracted if any)
         self._source_messages.pop(chat_id, None)
+        if code_files:
+            buf["text"] = cleaned_text
         await self._update_buffer_message(chat_id)
+        if code_files:
+            channel = self._client.get_channel(int(chat_id))
+            if channel:
+                await self._send_code_files(channel, code_files)
         del self._buffers[chat_id]
 
     async def _update_buffer_message(self, chat_id: str) -> None:
