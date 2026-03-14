@@ -239,7 +239,10 @@ async def add_mcp_server(request: Request):
     from pocketpaw.mcp.config import MCPServerConfig
     from pocketpaw.mcp.manager import get_mcp_manager
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     config = MCPServerConfig(
         name=data.get("name", ""),
         transport=data.get("transport", "stdio"),
@@ -270,7 +273,10 @@ async def remove_mcp_server(request: Request):
     """Remove an MCP server config and stop it if running."""
     from pocketpaw.mcp.manager import get_mcp_manager
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     name = data.get("name", "")
 
     mgr = get_mcp_manager()
@@ -287,7 +293,10 @@ async def toggle_mcp_server(request: Request):
     from pocketpaw.mcp.config import load_mcp_config
     from pocketpaw.mcp.manager import get_mcp_manager
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     name = data.get("name", "")
 
     mgr = get_mcp_manager()
@@ -320,7 +329,10 @@ async def test_mcp_server(request: Request):
     from pocketpaw.mcp.config import MCPServerConfig
     from pocketpaw.mcp.manager import get_mcp_manager
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     config = MCPServerConfig(
         name=data.get("name", "test"),
         transport=data.get("transport", "stdio"),
@@ -393,7 +405,10 @@ async def install_mcp_preset(request: Request):
     from pocketpaw.mcp.manager import get_mcp_manager
     from pocketpaw.mcp.presets import get_preset, preset_to_config
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     preset_id = data.get("preset_id", "")
     env = data.get("env", {})
     extra_args = data.get("extra_args", None)

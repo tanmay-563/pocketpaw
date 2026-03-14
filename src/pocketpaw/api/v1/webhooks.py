@@ -48,7 +48,10 @@ async def add_webhook(request: Request):
     """Create a new webhook slot (auto-generates secret)."""
     from pocketpaw.config import Settings
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     name = data.get("name", "").strip()
     description = data.get("description", "").strip()
 
@@ -84,7 +87,10 @@ async def remove_webhook(request: Request):
     """Remove a webhook slot by name."""
     from pocketpaw.config import Settings
 
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     name = data.get("name", "")
 
     settings = Settings.load()
